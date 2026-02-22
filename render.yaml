@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: vf-site-final-edhec
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEFAULT_USER
+        value: admin
+      - key: DEFAULT_PASS
+        value: edhec2026
+      - key: PYTHON_VERSION
+        value: "3.11.6"
