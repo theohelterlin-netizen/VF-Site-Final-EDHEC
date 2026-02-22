@@ -17,7 +17,9 @@ app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# --- DB helpers ---
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -28,6 +30,7 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
+    # Key-value store : miroir du localStorage du frontend
     cur.execute("""
         CREATE TABLE IF NOT EXISTS kv_store (
             key TEXT PRIMARY KEY,
@@ -36,6 +39,7 @@ def init_db():
         )
     """)
 
+    # Table fichiers PDF (stockes en binaire dans la base)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS pdf_files (
             id SERIAL PRIMARY KEY,
@@ -48,12 +52,13 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
-
-
-# --- Sync API (localStorage <-> PostgreSQL) ---
+# ---------------------------------------------------------------------------
+# Sync API  (remplace le localStorage par PostgreSQL)
+# ---------------------------------------------------------------------------
 
 @app.route("/api/sync/pull", methods=["GET"])
 def sync_pull():
+    """Renvoie TOUTES les cles/valeurs stockees en base."""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT key, value FROM kv_store ORDER BY key")
@@ -68,6 +73,7 @@ def sync_pull():
 
 @app.route("/api/sync/push", methods=["POST"])
 def sync_push():
+    """Recoit une ou plusieurs cles a sauvegarder."""
     data = request.get_json(silent=True) or {}
     conn = get_db()
     cur = conn.cursor()
@@ -88,6 +94,7 @@ def sync_push():
 
 @app.route("/api/sync/delete", methods=["POST"])
 def sync_delete():
+    """Supprime une cle."""
     data = request.get_json(silent=True) or {}
     key = data.get("key")
     if not key:
@@ -99,9 +106,9 @@ def sync_delete():
     cur.close()
     conn.close()
     return jsonify({"ok": True})
-
-
-# --- PDF management ---
+# ---------------------------------------------------------------------------
+# PDF management (stocke en base PostgreSQL)
+# ---------------------------------------------------------------------------
 
 @app.route("/pdfs")
 def list_pdfs():
@@ -169,16 +176,25 @@ def delete_pdf(filename):
     if deleted:
         return jsonify({"message": "Supprime"})
     return jsonify({"error": "Fichier non trouve"}), 404
+# ---------------------------------------------------------------------------
+# Serve index.html with ServerSync patch injected
+# ---------------------------------------------------------------------------
 
-
-# --- Serve index.html with ServerSync patch ---
+# Le PATCH_SCRIPT est genere dynamiquement pour eviter les problemes
+# avec les tags <script> dans les triple-quotes Python.
 
 def build_patch_script():
+    """Construit le JavaScript ServerSync a injecter."""
     js = r"""
 (function(){
+    // --- ServerSync reel : synchronise localStorage <-> PostgreSQL ---
     var PREFIX = 'edhec_';
+    var syncing = false;
+
     window.ServerSync = {
         enabled: true,
+
+        // Au demarrage : charge tout depuis le serveur -> localStorage
         init: function(){
             return fetch('/api/sync/pull')
                 .then(function(r){ return r.json(); })
@@ -197,6 +213,7 @@ def build_patch_script():
                     ServerSync.enabled = false;
                 });
         },
+        // Pousse UNE cle vers le serveur (appele par DB.set)
         push: function(k, v){
             if(!ServerSync.enabled) return Promise.resolve();
             var payload = {};
@@ -209,8 +226,16 @@ def build_patch_script():
                 console.warn('[ServerSync] Push failed for key:', k, e);
             });
         },
-        pullAll: function(){ return this.init(); },
+
+        // Pull all data from server
+        pullAll: function(){
+            return this.init();
+        },
+
+        // Push un fichier (non utilise pour le moment)
         pushFile: function(){ return Promise.resolve(); },
+
+        // Pousse TOUT le localStorage vers le serveur (bootstrap initial)
         pushAll: function(){
             var payload = {};
             var count = 0;
@@ -235,20 +260,30 @@ def build_patch_script():
             });
         }
     };
-    window.addEventListener('load', function(){
-        setTimeout(function(){
-            ServerSync.init().then(function(){
-                fetch('/api/sync/pull')
-                    .then(function(r){ return r.json(); })
-                    .then(function(data){
-                        if(Object.keys(data).length === 0){
-                            console.log('[ServerSync] Server empty, pushing local data...');
-                            ServerSync.pushAll();
-                        }
-                    });
+    // --- Patch DB.set pour synchroniser automatiquement ---
+    // On re-patche DB.set pour appeler notre nouveau ServerSync.push
+    if(window.DB && DB.set){
+        var _origSet = DB.set.bind(DB);
+        DB.set = function(k, v){
+            _origSet(k, v);
+            ServerSync.push(k, v);
+        };
+    }
+
+    // --- Auto-init : ce script tourne apres tout le JS du frontend ---
+    // Donc on execute directement (pas besoin d'attendre load).
+    ServerSync.init().then(function(){
+        // Si le serveur etait vide, pousser les donnees locales
+        fetch('/api/sync/pull')
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+                if(Object.keys(data).length === 0){
+                    console.log('[ServerSync] Server empty, pushing local data...');
+                    ServerSync.pushAll();
+                }
             });
-        }, 500);
     });
+
 })();
 """
     return "<" + "script>" + js + "</" + "script>"
@@ -260,15 +295,16 @@ def index():
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
     patch = build_patch_script()
-    html = html.replace("</head>", patch + "\n</head>", 1)
+    html = html.replace("</body>", patch + "\n</body>", 1)
     return Response(html, mimetype="text/html")
 
 
-# --- Init & Run ---
+# ---------------------------------------------------------------------------
+# Init & Run
+# ---------------------------------------------------------------------------
 
 init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
-
