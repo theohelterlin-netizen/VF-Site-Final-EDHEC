@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import (
     Flask, request, jsonify, send_from_directory,
-    session, send_file
+    session, send_file, Response
 )
 
 app = Flask(__name__, static_folder="static")
@@ -28,6 +28,7 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
+    # Table utilisateurs
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -36,6 +37,7 @@ def init_db():
         )
     """)
 
+    # Table fichiers PDF (stockes en binaire dans la base)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS pdf_files (
             id SERIAL PRIMARY KEY,
@@ -45,6 +47,7 @@ def init_db():
         )
     """)
 
+    # Table progression utilisateur
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_progress (
             id SERIAL PRIMARY KEY,
@@ -58,6 +61,7 @@ def init_db():
 
     conn.commit()
 
+    # Creer l'utilisateur par defaut s'il n'existe pas
     default_user = os.environ.get("DEFAULT_USER", "admin")
     default_pass = os.environ.get("DEFAULT_PASS", "edhec2026")
     pw_hash = hashlib.sha256(default_pass.encode()).hexdigest()
@@ -87,9 +91,23 @@ def login_required(f):
 
 # --- routes pages ---
 
+PATCH_SCRIPT = """<script>
+window.ServerSync={
+    enabled:false,
+    init:function(){return Promise.resolve()},
+    pullAll:function(){return Promise.resolve()},
+    push:function(){return Promise.resolve()},
+    pushFile:function(){return Promise.resolve()}
+};
+</script>"""
+
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    html_path = os.path.join(app.static_folder, "index.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("</head>", PATCH_SCRIPT + "\n</head>", 1)
+    return Response(html, mimetype="text/html")
 
 
 # --- auth ---
