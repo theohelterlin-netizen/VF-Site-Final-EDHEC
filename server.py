@@ -1,45 +1,80 @@
 import os
-import sqlite3
 import hashlib
 import secrets
+import base64
 from functools import wraps
+from io import BytesIO
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import (
     Flask, request, jsonify, send_from_directory,
-    session, redirect
+    session, send_file
 )
 
 app = Flask(__name__, static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
-DATABASE = os.path.join(os.path.dirname(__file__), "data", "users.db")
-PDF_FOLDER = os.path.join(os.path.dirname(__file__), "data", "files")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # fourni par Render PostgreSQL
+
+# --- helpers DB ---
 
 def get_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
+
 def init_db():
-    os.makedirs(os.path.dirname(DATABASE), exist_ok=True)
     conn = get_db()
-    conn.execute("""
+    cur = conn.cursor()
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pdf_files (
+            id SERIAL PRIMARY KEY,
+            filename TEXT UNIQUE NOT NULL,
+            data BYTEA NOT NULL,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_progress (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            item_value TEXT,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(username, item_key)
+        )
+    """)
+
     conn.commit()
+
     default_user = os.environ.get("DEFAULT_USER", "admin")
     default_pass = os.environ.get("DEFAULT_PASS", "edhec2026")
     pw_hash = hashlib.sha256(default_pass.encode()).hexdigest()
     try:
-        conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (default_user, pw_hash))
+        cur.execute(
+            "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+            (default_user, pw_hash)
+        )
         conn.commit()
-    except sqlite3.IntegrityError:
-        pass
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
     finally:
+        cur.close()
         conn.close()
+
+
+# --- decorateur auth ---
 
 def login_required(f):
     @wraps(f)
@@ -49,30 +84,47 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+
+# --- routes pages ---
+
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+# --- auth ---
 
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
     username = data.get("username", "").strip()
     password = data.get("password", "")
+
     if not username or not password:
         return jsonify({"error": "Champs requis"}), 400
+
     pw_hash = hashlib.sha256(password.encode()).hexdigest()
     conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE username = ? AND password_hash = ?", (username, pw_hash)).fetchone()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM users WHERE username = %s AND password_hash = %s",
+        (username, pw_hash)
+    )
+    user = cur.fetchone()
+    cur.close()
     conn.close()
+
     if user:
         session["user"] = username
         return jsonify({"message": "Connecte", "username": username})
     return jsonify({"error": "Identifiants incorrects"}), 401
 
+
 @app.route("/logout", methods=["POST"])
 def logout():
     session.pop("user", None)
     return jsonify({"message": "Deconnecte"})
+
 
 @app.route("/me")
 def me():
@@ -80,17 +132,129 @@ def me():
         return jsonify({"username": session["user"]})
     return jsonify({"username": None})
 
+
+# --- PDF management (stocke en base PostgreSQL) ---
+
 @app.route("/pdfs")
 @login_required
 def list_pdfs():
-    os.makedirs(PDF_FOLDER, exist_ok=True)
-    files = sorted(f for f in os.listdir(PDF_FOLDER) if f.lower().endswith(".pdf"))
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT filename FROM pdf_files ORDER BY filename")
+    files = [row["filename"] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
     return jsonify(files)
+
 
 @app.route("/pdfs/<filename>")
 @login_required
 def download_pdf(filename):
-    return send_from_directory(PDF_FOLDER, filename)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM pdf_files WHERE filename = %s", (filename,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if row is None:
+        return jsonify({"error": "Fichier non trouve"}), 404
+
+    return send_file(
+        BytesIO(bytes(row["data"])),
+        mimetype="application/pdf",
+        as_attachment=False,
+        download_name=filename
+    )
+
+
+@app.route("/pdfs/upload", methods=["POST"])
+@login_required
+def upload_pdf():
+    if "file" not in request.files:
+        return jsonify({"error": "Aucun fichier"}), 400
+
+    f = request.files["file"]
+    if not f.filename.lower().endswith(".pdf"):
+        return jsonify({"error": "Seuls les fichiers PDF sont acceptes"}), 400
+
+    data = f.read()
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO pdf_files (filename, data)
+               VALUES (%s, %s)
+               ON CONFLICT (filename)
+               DO UPDATE SET data = EXCLUDED.data, uploaded_at = NOW()""",
+            (f.filename, psycopg2.Binary(data))
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+    return jsonify({"message": "PDF uploade", "filename": f.filename})
+
+
+@app.route("/pdfs/<filename>", methods=["DELETE"])
+@login_required
+def delete_pdf(filename):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM pdf_files WHERE filename = %s", (filename,))
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    if deleted:
+        return jsonify({"message": "Supprime"})
+    return jsonify({"error": "Fichier non trouve"}), 404
+
+
+# --- progression utilisateur ---
+
+@app.route("/progress", methods=["GET"])
+@login_required
+def get_progress():
+    username = session["user"]
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT item_key, item_value FROM user_progress WHERE username = %s",
+        (username,)
+    )
+    progress = {row["item_key"]: row["item_value"] for row in cur.fetchall()}
+    cur.close()
+    conn.close()
+    return jsonify(progress)
+
+
+@app.route("/progress", methods=["POST"])
+@login_required
+def save_progress():
+    username = session["user"]
+    data = request.get_json(silent=True) or {}
+
+    conn = get_db()
+    cur = conn.cursor()
+    for key, value in data.items():
+        cur.execute(
+            """INSERT INTO user_progress (username, item_key, item_value)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (username, item_key)
+               DO UPDATE SET item_value = EXCLUDED.item_value,
+                             updated_at = NOW()""",
+            (username, key, str(value))
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Progression sauvegardee"})
+
+
+# --- init & run ---
 
 init_db()
 
