@@ -52,6 +52,8 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Sync API  (remplace le localStorage par PostgreSQL)
 # ---------------------------------------------------------------------------
@@ -106,6 +108,8 @@ def sync_delete():
     cur.close()
     conn.close()
     return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # PDF management (stocke en base PostgreSQL)
 # ---------------------------------------------------------------------------
@@ -176,6 +180,8 @@ def delete_pdf(filename):
     if deleted:
         return jsonify({"message": "Supprime"})
     return jsonify({"error": "Fichier non trouve"}), 404
+
+
 # ---------------------------------------------------------------------------
 # Serve index.html with ServerSync patch injected
 # ---------------------------------------------------------------------------
@@ -189,13 +195,14 @@ def build_patch_script():
 (function(){
     // --- ServerSync reel : synchronise localStorage <-> PostgreSQL ---
     var PREFIX = 'edhec_';
-    var syncing = false;
+    var _pulling = false;   // flag pour ne pas re-push pendant un pull
 
     window.ServerSync = {
         enabled: true,
 
         // Au demarrage : charge tout depuis le serveur -> localStorage
         init: function(){
+            _pulling = true;
             return fetch('/api/sync/pull')
                 .then(function(r){ return r.json(); })
                 .then(function(data){
@@ -203,19 +210,38 @@ def build_patch_script():
                     for(var i=0; i<keys.length; i++){
                         localStorage.setItem(keys[i], data[keys[i]]);
                     }
+                    _pulling = false;
                     if(keys.length > 0){
                         console.log('[ServerSync] Pulled ' + keys.length + ' keys from server');
                     }
                     ServerSync.enabled = true;
+                    return keys.length;
                 })
                 .catch(function(e){
+                    _pulling = false;
                     console.warn('[ServerSync] Pull failed, working offline', e);
                     ServerSync.enabled = false;
+                    return 0;
                 });
         },
+
+        // Pousse UNE cle brute (avec prefixe complet) vers le serveur
+        pushRaw: function(fullKey, rawValue){
+            if(!ServerSync.enabled || _pulling) return Promise.resolve();
+            var payload = {};
+            payload[fullKey] = rawValue;
+            return fetch('/api/sync/push', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(payload)
+            }).catch(function(e){
+                console.warn('[ServerSync] Push failed for key:', fullKey, e);
+            });
+        },
+
         // Pousse UNE cle vers le serveur (appele par DB.set)
         push: function(k, v){
-            if(!ServerSync.enabled) return Promise.resolve();
+            if(!ServerSync.enabled || _pulling) return Promise.resolve();
             var payload = {};
             payload[PREFIX + k] = JSON.stringify(v);
             return fetch('/api/sync/push', {
@@ -227,12 +253,7 @@ def build_patch_script():
             });
         },
 
-        // Pull all data from server
-        pullAll: function(){
-            return this.init();
-        },
-
-        // Push un fichier (non utilise pour le moment)
+        pullAll: function(){ return this.init(); },
         pushFile: function(){ return Promise.resolve(); },
 
         // Pousse TOUT le localStorage vers le serveur (bootstrap initial)
@@ -260,28 +281,30 @@ def build_patch_script():
             });
         }
     };
-    // --- Patch DB.set pour synchroniser automatiquement ---
-    // On re-patche DB.set pour appeler notre nouveau ServerSync.push
-    if(window.DB && DB.set){
-        var _origSet = DB.set.bind(DB);
-        DB.set = function(k, v){
-            _origSet(k, v);
-            ServerSync.push(k, v);
-        };
-    }
 
-    // --- Auto-init : ce script tourne apres tout le JS du frontend ---
-    // Donc on execute directement (pas besoin d'attendre load).
-    ServerSync.init().then(function(){
+    // --- Patch localStorage.setItem pour capturer TOUTES les ecritures edhec_ ---
+    var _origSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value){
+        _origSetItem.call(this, key, value);
+        if(this === localStorage && key.startsWith(PREFIX) && !_pulling && ServerSync.enabled){
+            ServerSync.pushRaw(key, value);
+        }
+    };
+
+    // --- Auto-init avec reload unique pour forcer le re-rendu ---
+    ServerSync.init().then(function(pulledCount){
+        if(pulledCount > 0 && !sessionStorage.getItem('_ss_synced')){
+            // Premier chargement : on a tire des donnees serveur.
+            // On force un reload pour que le frontend re-rende avec les bonnes donnees.
+            sessionStorage.setItem('_ss_synced', '1');
+            location.reload();
+            return;
+        }
         // Si le serveur etait vide, pousser les donnees locales
-        fetch('/api/sync/pull')
-            .then(function(r){ return r.json(); })
-            .then(function(data){
-                if(Object.keys(data).length === 0){
-                    console.log('[ServerSync] Server empty, pushing local data...');
-                    ServerSync.pushAll();
-                }
-            });
+        if(pulledCount === 0){
+            console.log('[ServerSync] Server empty, pushing local data...');
+            ServerSync.pushAll();
+        }
     });
 
 })();
