@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EDHEC - Documents</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5; color: #1a1a2e; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #login-section {
+      background: #fff; padding: 2.5rem 2rem; border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.08); width: 100%; max-width: 380px; text-align: center;
+    }
+    #login-section h1 { font-size: 1.6rem; margin-bottom: .4rem; color: #0d1b4c; }
+    #login-section p.subtitle { font-size: .9rem; color: #666; margin-bottom: 1.6rem; }
+    #login-section input {
+      width: 100%; padding: .7rem 1rem; margin-bottom: .8rem;
+      border: 1px solid #d0d5dd; border-radius: 8px; font-size: .95rem;
+    }
+    #login-section input:focus { outline: none; border-color: #0d1b4c; }
+    #login-section button {
+      width: 100%; padding: .75rem; background: #0d1b4c; color: #fff;
+      border: none; border-radius: 8px; font-size: 1rem; cursor: pointer;
+    }
+    #login-section button:hover { background: #162d6e; }
+    .error-msg { color: #d32f2f; font-size: .85rem; margin-bottom: .6rem; min-height: 1.2rem; }
+    #dashboard { display: none; width: 100%; max-width: 720px; padding: 1rem; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.4rem; }
+    .topbar h1 { font-size: 1.4rem; color: #0d1b4c; }
+    .topbar .user-info { display: flex; align-items: center; gap: .8rem; font-size: .9rem; color: #444; }
+    .btn-logout {
+      padding: .45rem 1rem; background: #e74c3c; color: #fff;
+      border: none; border-radius: 6px; cursor: pointer; font-size: .85rem;
+    }
+    .btn-logout:hover { background: #c0392b; }
+    .pdf-list { list-style: none; }
+    .pdf-item {
+      background: #fff; padding: 1rem 1.2rem; border-radius: 10px; margin-bottom: .6rem;
+      display: flex; justify-content: space-between; align-items: center;
+      box-shadow: 0 1px 6px rgba(0,0,0,.05);
+    }
+    .pdf-item:hover { transform: translateY(-2px); }
+    .pdf-name { font-weight: 500; word-break: break-all; }
+    .btn-download {
+      padding: .4rem .9rem; background: #0d1b4c; color: #fff; text-decoration: none;
+      border-radius: 6px; font-size: .85rem; white-space: nowrap;
+    }
+    .btn-download:hover { background: #162d6e; }
+    .empty-state { text-align: center; color: #888; margin-top: 3rem; font-size: .95rem; }
+  </style>
+</head>
+<body>
+  <div id="login-section">
+    <h1>EDHEC Documents</h1>
+    <p class="subtitle">Connectez-vous pour acceder aux fichiers</p>
+    <div class="error-msg" id="login-error"></div>
+    <form id="login-form">
+      <input type="text" id="username" placeholder="Nom d'utilisateur" autocomplete="username" required />
+      <input type="password" id="password" placeholder="Mot de passe" autocomplete="current-password" required />
+      <button type="submit">Se connecter</button>
+    </form>
+  </div>
+  <div id="dashboard">
+    <div class="topbar">
+      <h1>Fichiers PDF</h1>
+      <div class="user-info">
+        <span id="display-user"></span>
+        <button class="btn-logout" id="btn-logout">Deconnexion</button>
+      </div>
+    </div>
+    <ul class="pdf-list" id="pdf-list"></ul>
+  </div>
+  <script>
+    const loginSection = document.getElementById("login-section");
+    const dashboard = document.getElementById("dashboard");
+    const loginForm = document.getElementById("login-form");
+    const loginError = document.getElementById("login-error");
+    const displayUser = document.getElementById("display-user");
+    const pdfList = document.getElementById("pdf-list");
+    const btnLogout = document.getElementById("btn-logout");
+    async function api(url, opts) {
+      opts = opts || {};
+      var res = await fetch(url, Object.assign({ headers: {"Content-Type":"application/json"} }, opts));
+      return { ok: res.ok, status: res.status, data: await res.json() };
+    }
+    function showDashboard(username) {
+      loginSection.style.display = "none";
+      dashboard.style.display = "block";
+      document.body.style.alignItems = "flex-start";
+      displayUser.textContent = username;
+      loadPdfs();
+    }
+    function showLogin() {
+      dashboard.style.display = "none";
+      loginSection.style.display = "block";
+      document.body.style.alignItems = "center";
+      loginError.textContent = "";
+    }
+    async function loadPdfs() {
+      var r = await api("/pdfs");
+      pdfList.innerHTML = "";
+      if (!r.ok || r.data.length === 0) {
+        pdfList.innerHTML = '<li class="empty-state">Aucun fichier PDF disponible.</li>';
+        return;
+      }
+      r.data.forEach(function(name) {
+        var li = document.createElement("li");
+        li.className = "pdf-item";
+        li.innerHTML = '<span class="pdf-name">' + name + '</span><a class="btn-download" href="/pdfs/' + encodeURIComponent(name) + '" target="_blank">Telecharger</a>';
+        pdfList.appendChild(li);
+      });
+    }
+    loginForm.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      loginError.textContent = "";
+      var username = document.getElementById("username").value.trim();
+      var password = document.getElementById("password").value;
+      var r = await api("/login", { method: "POST", body: JSON.stringify({ username: username, password: password }) });
+      if (r.ok) showDashboard(r.data.username);
+      else loginError.textContent = r.data.error || "Erreur de connexion";
+    });
+    btnLogout.addEventListener("click", async function() {
+      await api("/logout", { method: "POST" });
+      showLogin();
+    });
+    (async function() {
+      var r = await api("/me");
+      if (r.ok && r.data.username) showDashboard(r.data.username);
+    })();
+  </script>
+</body>
+</html>
