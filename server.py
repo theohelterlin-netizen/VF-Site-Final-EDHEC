@@ -466,8 +466,7 @@ def build_annales_patch():
         if(typeof Auth === 'undefined' || !Auth.admin()) return;
         // Trouver tous les conteneurs d annales
         document.querySelectorAll('[id^="annales-tab-"]').forEach(function(container){
-            if(container.dataset.enhanced) return;
-            container.dataset.enhanced = '1';
+            if(container.querySelectorAll('.ann-admin-actions').length > 0) return;
             var slug = container.id.replace('annales-tab-','');
             // Trouver les items d annales : ce sont des div.card.ani
             var items = container.querySelectorAll('.card.ani');
@@ -508,6 +507,7 @@ def build_annales_patch():
 
             // Activer le drag & drop
             initAnnalesDragDrop(slug);
+            container.dataset.enhanced = '1';
         });
     }
 
