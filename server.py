@@ -328,7 +328,7 @@ def build_annales_patch():
 
     // --- Initialiser le drag & drop sur les elements annales ---
     window.initAnnalesDragDrop = function(slug){
-        var container = document.getElementById('annales-list-' + slug);
+        var container = document.getElementById('annales-tab-' + slug);
         if(!container) return;
         var items = container.querySelectorAll('.ann-item');
         var dragSrcIdx = null;
@@ -440,15 +440,18 @@ def build_annales_patch():
     function enhanceAnnalesUI(){
         if(typeof Auth === 'undefined' || !Auth.admin()) return;
         // Trouver tous les conteneurs d annales
-        document.querySelectorAll('[id^="annales-list-"]').forEach(function(container){
+        document.querySelectorAll('[id^="annales-tab-"]').forEach(function(container){
             if(container.dataset.enhanced) return;
             container.dataset.enhanced = '1';
-            var slug = container.id.replace('annales-list-','');
-            // Trouver les items d annales dans ce conteneur
-            var items = container.querySelectorAll('.ann-item, .cb, [onclick*="downloadAnnaleFile"]');
+            var slug = container.id.replace('annales-tab-','');
+            // Trouver les items d annales : ce sont des div.card.ani
+            var items = container.querySelectorAll('.card.ani');
             if(items.length === 0){
-                // Essayer de trouver les elements enfants directs qui representent les annales
-                items = container.children;
+                // Fallback: chercher les elements avec bouton download
+                var btns = container.querySelectorAll('[onclick*="downloadAnnaleFile"]');
+                var cardSet = new Set();
+                btns.forEach(function(b){ var c = b.closest('.card'); if(c) cardSet.add(c); });
+                items = Array.from(cardSet);
             }
 
             var key = getAnnalesKey(slug);
