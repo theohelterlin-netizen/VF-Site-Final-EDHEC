@@ -189,6 +189,314 @@ def delete_pdf(filename):
 # Le PATCH_SCRIPT est genere dynamiquement pour eviter les problemes
 # avec les tags <script> dans les triple-quotes Python.
 
+def build_branding_patch():
+    """Renomme le site de Reussir l EDHEC a Reussir Etudes dans le DOM."""
+    js = r"""
+(function(){
+    // --- Renommage du site ---
+    function renameSite(){
+        // Titre de la page
+        document.title = document.title.replace(/Réussir l'EDHEC/g, 'Réussir Études');
+        // Tous les elements texte visibles
+        var walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        while(walk.nextNode()){
+            var n = walk.currentNode;
+            if(n.nodeValue.indexOf("Réussir l'EDHEC") !== -1){
+                n.nodeValue = n.nodeValue.replace(/Réussir l'EDHEC/g, 'Réussir Études');
+            }
+            if(n.nodeValue.indexOf("Réussir l\\'EDHEC") !== -1){
+                n.nodeValue = n.nodeValue.replace(/Réussir l\\'EDHEC/g, 'Réussir Études');
+            }
+        }
+        // Aussi dans les placeholders et titles
+        document.querySelectorAll('[placeholder],[title]').forEach(function(el){
+            if(el.placeholder && el.placeholder.indexOf('EDHEC')!==-1)
+                el.placeholder = el.placeholder.replace(/EDHEC/g,'Études');
+            if(el.title && el.title.indexOf('EDHEC')!==-1)
+                el.title = el.title.replace(/EDHEC/g,'Études');
+        });
+    }
+    // Executer au chargement et apres chaque navigation SPA
+    if(document.readyState==='loading'){
+        document.addEventListener('DOMContentLoaded', function(){ setTimeout(renameSite, 100); });
+    } else {
+        setTimeout(renameSite, 100);
+    }
+    // Observer les changements DOM pour re-renommer apres navigation SPA
+    var _renameTimer = null;
+    new MutationObserver(function(){
+        clearTimeout(_renameTimer);
+        _renameTimer = setTimeout(renameSite, 200);
+    }).observe(document.body, {childList:true, subtree:true, characterData:true});
+})();
+"""
+    return "<" + "script>" + js + "</" + "script>"
+
+
+def build_annales_patch():
+    """Ajoute les fonctionnalites admin pour les annales : renommer, supprimer, reordonner par drag and drop."""
+    js = r"""
+(function(){
+    // --- CSS pour le drag & drop des annales ---
+    var style = document.createElement('style');
+    style.textContent = '\
+    .ann-item { position:relative; transition: transform 0.2s, box-shadow 0.2s; }\
+    .ann-item.dragging { opacity:0.5; transform:scale(0.97); box-shadow:0 8px 32px rgba(0,0,0,0.3); z-index:100; }\
+    .ann-item.drag-over-top { border-top:3px solid #E07A5F !important; }\
+    .ann-item.drag-over-bottom { border-bottom:3px solid #E07A5F !important; }\
+    .ann-admin-actions { display:inline-flex; gap:6px; margin-left:8px; align-items:center; }\
+    .ann-admin-actions button { background:transparent; border:1px solid rgba(255,255,255,0.2); color:rgba(255,255,255,0.7); border-radius:6px; padding:3px 8px; font-size:0.75rem; cursor:pointer; transition:all 0.2s; }\
+    .ann-admin-actions button:hover { background:rgba(255,255,255,0.1); color:#fff; }\
+    .ann-admin-actions button.del:hover { background:rgba(224,90,90,0.2); color:#E07A5F; border-color:#E07A5F; }\
+    .ann-drag-handle { cursor:grab; padding:4px 6px; color:rgba(255,255,255,0.4); font-size:1.1rem; user-select:none; }\
+    .ann-drag-handle:active { cursor:grabbing; }\
+    ';
+    document.head.appendChild(style);
+
+    // --- Stockage des fonctions originales ---
+    var _origGetAnnalesTabHTML = window.getAnnalesTabHTML;
+    var _origDeleteAnnale = window.deleteAnnale;
+    var _origRefreshAnnalesTab = window.refreshAnnalesTab;
+
+    // --- Helper : obtenir la cle annales pour un slug ---
+    function getAnnalesKey(slug){
+        // Les annales sont stockees sous differentes cles selon le slug
+        // ex: edhec_annales_mafi, edhec_ct_microeco_annales
+        var possibleKeys = [
+            'annales_' + slug,
+            'ct_' + slug + '_annales'
+        ];
+        for(var i=0; i<possibleKeys.length; i++){
+            var val = DB.get(possibleKeys[i]);
+            if(val !== null && val !== undefined) return possibleKeys[i];
+        }
+        // Chercher dans toutes les cles localStorage
+        for(var j=0; j<localStorage.length; j++){
+            var key = localStorage.key(j);
+            if(key.indexOf('annale') !== -1 && key.indexOf(slug) !== -1){
+                return key.replace('edhec_','');
+            }
+        }
+        return 'annales_' + slug;
+    }
+
+    // --- Renommer une annale ---
+    window.renameAnnale = function(slug, idx){
+        var key = getAnnalesKey(slug);
+        var list = DB.get(key) || [];
+        if(idx < 0 || idx >= list.length) return;
+        var oldName = list[idx].name || 'Sans nom';
+        var newName = prompt('Renommer cette annale :', oldName);
+        if(newName !== null && newName.trim() !== ''){
+            list[idx].name = newName.trim();
+            DB.set(key, list);
+            if(typeof refreshAnnalesTab === 'function') refreshAnnalesTab(slug);
+            if(typeof toast === 'function') toast('Annale renommee');
+        }
+    };
+
+    // --- Supprimer une annale (override ameliore) ---
+    window.deleteAnnaleEnhanced = function(slug, idx){
+        var key = getAnnalesKey(slug);
+        var list = DB.get(key) || [];
+        if(idx < 0 || idx >= list.length) return;
+        var name = list[idx].name || 'Sans nom';
+        if(!confirm('Supprimer "' + name + '" ?')) return;
+        // Supprimer les fichiers associes dans FDB
+        if(list[idx].sujetId && typeof FDB !== 'undefined'){
+            try { FDB.del(list[idx].sujetId); } catch(e){}
+        }
+        if(list[idx].corrId && typeof FDB !== 'undefined'){
+            try { FDB.del(list[idx].corrId); } catch(e){}
+        }
+        list.splice(idx, 1);
+        DB.set(key, list);
+        if(typeof refreshAnnalesTab === 'function') refreshAnnalesTab(slug);
+        if(typeof toast === 'function') toast('Annale supprimee');
+    };
+
+    // --- Reordonner les annales (deplacer un element) ---
+    window.moveAnnale = function(slug, fromIdx, toIdx){
+        var key = getAnnalesKey(slug);
+        var list = DB.get(key) || [];
+        if(fromIdx < 0 || fromIdx >= list.length || toIdx < 0 || toIdx >= list.length) return;
+        var item = list.splice(fromIdx, 1)[0];
+        list.splice(toIdx, 0, item);
+        DB.set(key, list);
+        if(typeof refreshAnnalesTab === 'function') refreshAnnalesTab(slug);
+    };
+
+    // --- Initialiser le drag & drop sur les elements annales ---
+    window.initAnnalesDragDrop = function(slug){
+        var container = document.getElementById('annales-list-' + slug);
+        if(!container) return;
+        var items = container.querySelectorAll('.ann-item');
+        var dragSrcIdx = null;
+
+        items.forEach(function(item, idx){
+            // Touch events pour mobile (maintenir + glisser)
+            var touchTimer = null;
+            var isDragging = false;
+            var touchStartY = 0;
+            var dragClone = null;
+
+            item.addEventListener('touchstart', function(e){
+                touchStartY = e.touches[0].clientY;
+                touchTimer = setTimeout(function(){
+                    isDragging = true;
+                    dragSrcIdx = idx;
+                    item.classList.add('dragging');
+                    // Vibration feedback si disponible
+                    if(navigator.vibrate) navigator.vibrate(50);
+                }, 400);
+            }, {passive:true});
+
+            item.addEventListener('touchmove', function(e){
+                if(!isDragging){
+                    // Si on bouge trop avant le timer, annuler
+                    if(Math.abs(e.touches[0].clientY - touchStartY) > 10){
+                        clearTimeout(touchTimer);
+                    }
+                    return;
+                }
+                e.preventDefault();
+                var touchY = e.touches[0].clientY;
+                // Trouver l element sous le doigt
+                items.forEach(function(otherItem, otherIdx){
+                    otherItem.classList.remove('drag-over-top', 'drag-over-bottom');
+                    if(otherIdx === idx) return;
+                    var rect = otherItem.getBoundingClientRect();
+                    var midY = rect.top + rect.height / 2;
+                    if(touchY > rect.top && touchY < rect.bottom){
+                        if(touchY < midY){
+                            otherItem.classList.add('drag-over-top');
+                        } else {
+                            otherItem.classList.add('drag-over-bottom');
+                        }
+                    }
+                });
+            }, {passive:false});
+
+            item.addEventListener('touchend', function(e){
+                clearTimeout(touchTimer);
+                if(!isDragging){ return; }
+                isDragging = false;
+                item.classList.remove('dragging');
+                // Trouver la cible
+                var targetIdx = -1;
+                items.forEach(function(otherItem, otherIdx){
+                    if(otherItem.classList.contains('drag-over-top')){
+                        targetIdx = otherIdx;
+                    } else if(otherItem.classList.contains('drag-over-bottom')){
+                        targetIdx = otherIdx;
+                    }
+                    otherItem.classList.remove('drag-over-top', 'drag-over-bottom');
+                });
+                if(targetIdx >= 0 && targetIdx !== dragSrcIdx){
+                    moveAnnale(slug, dragSrcIdx, targetIdx);
+                }
+            });
+
+            // Desktop drag & drop
+            item.setAttribute('draggable', 'true');
+            item.addEventListener('dragstart', function(e){
+                dragSrcIdx = idx;
+                item.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', idx);
+            });
+            item.addEventListener('dragend', function(){
+                item.classList.remove('dragging');
+                items.forEach(function(it){ it.classList.remove('drag-over-top','drag-over-bottom'); });
+            });
+            item.addEventListener('dragover', function(e){
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                var rect = item.getBoundingClientRect();
+                var midY = rect.top + rect.height/2;
+                items.forEach(function(it){ it.classList.remove('drag-over-top','drag-over-bottom'); });
+                if(e.clientY < midY){
+                    item.classList.add('drag-over-top');
+                } else {
+                    item.classList.add('drag-over-bottom');
+                }
+            });
+            item.addEventListener('dragleave', function(){
+                item.classList.remove('drag-over-top','drag-over-bottom');
+            });
+            item.addEventListener('drop', function(e){
+                e.preventDefault();
+                items.forEach(function(it){ it.classList.remove('drag-over-top','drag-over-bottom'); });
+                var fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+                var toIdx = idx;
+                if(fromIdx !== toIdx){
+                    moveAnnale(slug, fromIdx, toIdx);
+                }
+            });
+        });
+    };
+
+    // --- Observer le DOM pour injecter les boutons admin dans les annales ---
+    function enhanceAnnalesUI(){
+        if(typeof Auth === 'undefined' || !Auth.admin()) return;
+        // Trouver tous les conteneurs d annales
+        document.querySelectorAll('[id^="annales-list-"]').forEach(function(container){
+            if(container.dataset.enhanced) return;
+            container.dataset.enhanced = '1';
+            var slug = container.id.replace('annales-list-','');
+            // Trouver les items d annales dans ce conteneur
+            var items = container.querySelectorAll('.ann-item, .cb, [onclick*="downloadAnnaleFile"]');
+            if(items.length === 0){
+                // Essayer de trouver les elements enfants directs qui representent les annales
+                items = container.children;
+            }
+
+            var key = getAnnalesKey(slug);
+            var list = DB.get(key) || [];
+
+            Array.from(items).forEach(function(item, idx){
+                if(item.querySelector('.ann-admin-actions')) return;
+                if(idx >= list.length) return;
+
+                // Ajouter la classe ann-item si pas deja la
+                item.classList.add('ann-item');
+
+                // Creer les boutons admin
+                var actions = document.createElement('span');
+                actions.className = 'ann-admin-actions';
+                actions.innerHTML = '<span class="ann-drag-handle" title="Maintenir et glisser pour reordonner">&#x2630;</span>' +
+                    '<button onclick="renameAnnale(\'' + slug + '\',' + idx + ')" title="Renommer">&#x270E; Renommer</button>' +
+                    '<button class="del" onclick="deleteAnnaleEnhanced(\'' + slug + '\',' + idx + ')" title="Supprimer">&#x2716; Supprimer</button>';
+
+                // Inserer les actions dans le premier element de type titre/nom
+                var titleEl = item.querySelector('strong, .ann-name, h4, h3') || item.firstElementChild;
+                if(titleEl){
+                    titleEl.appendChild(actions);
+                } else {
+                    item.appendChild(actions);
+                }
+            });
+
+            // Activer le drag & drop
+            initAnnalesDragDrop(slug);
+        });
+    }
+
+    // Observer le DOM pour les changements (navigation SPA)
+    var _enhanceTimer = null;
+    new MutationObserver(function(){
+        clearTimeout(_enhanceTimer);
+        _enhanceTimer = setTimeout(enhanceAnnalesUI, 300);
+    }).observe(document.body, {childList:true, subtree:true});
+    // Aussi au chargement initial
+    setTimeout(enhanceAnnalesUI, 500);
+
+    console.log('[AnnalesPatch] Admin annales features loaded');
+})();
+"""
+    return "<" + "script>" + js + "</" + "script>"
+
+
 def build_patch_script():
     """Construit le JavaScript ServerSync a injecter."""
     js = r"""
@@ -317,8 +625,14 @@ def index():
     html_path = os.path.join(app.static_folder, "index.html")
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
+    # Renommer le site dans le HTML statique
+    html = html.replace("Réussir l'EDHEC", "Réussir Études")
+    html = html.replace("Réussir l\\'EDHEC", "Réussir Études")
+    # Injecter les scripts (ServerSync + Branding + Annales admin)
     patch = build_patch_script()
-    html = html.replace("</body>", patch + "\n</body>", 1)
+    branding = build_branding_patch()
+    annales = build_annales_patch()
+    html = html.replace("</body>", patch + "\n" + branding + "\n" + annales + "\n</body>", 1)
     return Response(html, mimetype="text/html")
 
 
