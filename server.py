@@ -1153,6 +1153,47 @@ def build_nav_fix_patch():
         };
     }
 
+    // Fix 5: Professeur role - track devices but never block
+    var _origDoLogin = window.doLogin;
+    if(typeof _origDoLogin === 'function'){
+        window.doLogin = function(e){
+            e.preventDefault();
+            var email = document.getElementById('lemail').value;
+            var pw = document.getElementById('lpw').value;
+            var u = Auth.login(email, pw);
+            if(u){
+                if(u.status==='banned'){
+                    sessionStorage.removeItem('edhec_user');
+                    renderBannedScreen();
+                    return false;
+                }
+                if(u.role==='professeur'){
+                    var devCheck = DeviceTracker.checkDevice(u.id);
+                    if(devCheck.status==='blocked' && devCheck.device){
+                        DeviceTracker.approveDevice(u.id, devCheck.device.id);
+                    }
+                    toast('Bienvenue '+u.name,'ok');
+                    navigate('/dashboard');
+                    return false;
+                }
+                if(u.role!=='admin'){
+                    var devCheck = DeviceTracker.checkDevice(u.id);
+                    if(devCheck.status==='blocked'){
+                        sessionStorage.setItem('edhec_device_blocked',JSON.stringify({userId:u.id,deviceId:devCheck.device.id}));
+                        sessionStorage.removeItem('edhec_user');
+                        renderDeviceBlockedScreen();
+                        return false;
+                    }
+                }
+                toast('Bienvenue '+u.name,'ok');
+                navigate('/dashboard');
+            } else {
+                document.getElementById('lerr').textContent='Email ou mot de passe incorrect';
+            }
+            return false;
+        };
+    }
+
     console.log('[NavFix] All navigation patches applied');
 })();
 """
