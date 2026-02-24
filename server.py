@@ -1194,7 +1194,72 @@ def build_nav_fix_patch():
         };
     }
 
-    console.log('[NavFix] All navigation patches applied');
+    // Fix 6: Add professeur role to admin UI
+        var _origEditUser = window.editUser;
+        if(typeof _origEditUser === 'function'){
+            window.editUser = function(id){
+                _origEditUser(id);
+                setTimeout(function(){
+                    var sel = document.getElementById('u_role');
+                    if(sel && !sel.querySelector('option[value="professeur"]')){
+                        var opt = document.createElement('option');
+                        opt.value = 'professeur';
+                        opt.textContent = 'Professeur';
+                        sel.insertBefore(opt, sel.querySelector('option[value="admin"]'));
+                        var u = id ? DB.find('users', id) : null;
+                        if(u && u.role === 'professeur') opt.selected = true;
+                    }
+                }, 50);
+            };
+        }
+
+        var _origShowUserDetail = window.showUserDetail;
+        if(typeof _origShowUserDetail === 'function'){
+            window.showUserDetail = function(id){
+                _origShowUserDetail(id);
+                setTimeout(function(){
+                    var labels = document.querySelectorAll('.user-detail-item label');
+                    labels.forEach(function(lbl){
+                        if(lbl.textContent.trim() === 'R\u00f4le'){
+                            var valDiv = lbl.nextElementSibling;
+                            var u = DB.find('users', id);
+                            if(u && u.role === 'professeur' && valDiv){
+                                valDiv.textContent = 'Professeur';
+                            }
+                        }
+                    });
+                }, 50);
+            };
+        }
+
+        var _origRenderAdminUsers = window.renderAdminUsers;
+        if(typeof _origRenderAdminUsers === 'function'){
+            window.renderAdminUsers = function(){
+                _origRenderAdminUsers.apply(this, arguments);
+                setTimeout(function(){
+                    document.querySelectorAll('.user-row').forEach(function(row){
+                        var badges = row.querySelectorAll('span');
+                        badges.forEach(function(sp){
+                            if(sp.textContent.trim() === '\u00c9tudiant'){
+                                var onclick = row.getAttribute('onclick');
+                                if(onclick){
+                                    var m = onclick.match(/showUserDetail\('([^']+)'\)/);
+                                    if(m){
+                                        var u = DB.find('users', m[1]);
+                                        if(u && u.role === 'professeur'){
+                                            sp.textContent = 'Professeur';
+                                            sp.style.background = '#2A6478';
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }, 100);
+            };
+        }
+
+        console.log('[NavFix] All navigation patches applied');
 })();
 """
     return "<" + "script>" + js + "</" + "script>"
