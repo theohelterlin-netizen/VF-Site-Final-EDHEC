@@ -1114,11 +1114,17 @@ def build_patch_script():
 def build_nav_fix_patch():
     js = """
 (function(){
-    var _origNavigate = window.navigate;
+    // Fix 1: Override navigate to fix double-slash AND call route()
     window.navigate = function(p) {
         while(p.indexOf('//')===0) p = p.substring(1);
-        _origNavigate(p);
+        location.hash = p;
+        if(typeof route === 'function') route();
     };
+
+    // Fix 2: Ensure hashchange always calls route()
+    window.addEventListener('hashchange', function(){
+        if(typeof route === 'function') route();
+    });
     if(typeof ServerSync !== 'undefined' && ServerSync && ServerSync.init){
         var _origInit = ServerSync.init;
         ServerSync.init = function(){
@@ -1126,7 +1132,7 @@ def build_nav_fix_patch():
             catch(e){ console.warn('[ServerSync] init error:', e); return Promise.resolve(0); }
         };
     }
-    console.log('[NavFix] Patches applied');
+    console.log('[NavFix] Navigation, hashchange, and ServerSync patches applied');
 })();
 """
     return "<" + "script>" + js + "</" + "script>"
