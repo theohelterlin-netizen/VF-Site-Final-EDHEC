@@ -292,24 +292,24 @@ def build_branding_patch():
     // --- Renommage du site ---
     function renameSite(){
         // Titre de la page
-        document.title = document.title.replace(/RÃ©ussir l'EDHEC/g, 'RÃ©ussir Ãtudes');
+        document.title = document.title.replace(/RÃÂ©ussir l'EDHEC/g, 'RÃÂ©ussir ÃÂtudes');
         // Tous les elements texte visibles
         var walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
         while(walk.nextNode()){
             var n = walk.currentNode;
-            if(n.nodeValue.indexOf("RÃ©ussir l'EDHEC") !== -1){
-                n.nodeValue = n.nodeValue.replace(/RÃ©ussir l'EDHEC/g, 'RÃ©ussir Ãtudes');
+            if(n.nodeValue.indexOf("RÃÂ©ussir l'EDHEC") !== -1){
+                n.nodeValue = n.nodeValue.replace(/RÃÂ©ussir l'EDHEC/g, 'RÃÂ©ussir ÃÂtudes');
             }
-            if(n.nodeValue.indexOf("RÃ©ussir l\\'EDHEC") !== -1){
-                n.nodeValue = n.nodeValue.replace(/RÃ©ussir l\\'EDHEC/g, 'RÃ©ussir Ãtudes');
+            if(n.nodeValue.indexOf("RÃÂ©ussir l\\'EDHEC") !== -1){
+                n.nodeValue = n.nodeValue.replace(/RÃÂ©ussir l\\'EDHEC/g, 'RÃÂ©ussir ÃÂtudes');
             }
         }
         // Aussi dans les placeholders et titles
         document.querySelectorAll('[placeholder],[title]').forEach(function(el){
             if(el.placeholder && el.placeholder.indexOf('EDHEC')!==-1)
-                el.placeholder = el.placeholder.replace(/EDHEC/g,'Ãtudes');
+                el.placeholder = el.placeholder.replace(/EDHEC/g,'ÃÂtudes');
             if(el.title && el.title.indexOf('EDHEC')!==-1)
-                el.title = el.title.replace(/EDHEC/g,'Ãtudes');
+                el.title = el.title.replace(/EDHEC/g,'ÃÂtudes');
         });
     }
     // Executer au chargement et apres chaque navigation SPA
@@ -706,6 +706,81 @@ def build_filesync_patch():
       };
 
       console.log("[FileSync] FDB patched for server sync");
+
+      // --- Bulk sync : pousse tous les fichiers IndexedDB vers le serveur ---
+      // Se lance automatiquement au chargement pour les admins
+      async function bulkSyncToServer(){
+        // Attendre que Auth soit disponible
+        if(typeof Auth === "undefined" || !Auth.admin || !Auth.admin()) return;
+        if(sessionStorage.getItem("_fdb_bulk_synced")) return;
+        console.log("[FileSync] Admin detected, starting bulk sync of local files...");
+        try {
+          var db = await new Promise(function(res, rej){
+            var req = indexedDB.open("edhec_files", 1);
+            req.onsuccess = function(e){ res(e.target.result); };
+            req.onerror = function(e){ rej(e); };
+          });
+          var tx = db.transaction("files", "readonly");
+          var store = tx.objectStore("files");
+          var allKeys = await new Promise(function(res, rej){
+            var req = store.getAllKeys();
+            req.onsuccess = function(){ res(req.result); };
+            req.onerror = function(e){ rej(e); };
+          });
+          console.log("[FileSync] Found " + allKeys.length + " local files to check");
+          var synced = 0;
+          for(var k = 0; k < allKeys.length; k++){
+            var fid = allKeys[k];
+            try {
+              // Verifier si le fichier existe deja sur le serveur
+              var metaResp = await fetch("/api/files/" + encodeURIComponent(fid) + "/meta");
+              if(metaResp.ok) continue; // deja sur le serveur
+              // Recuperer le fichier depuis IndexedDB
+              var obj = await new Promise(function(res, rej){
+                var tx2 = db.transaction("files", "readonly");
+                var r = tx2.objectStore("files").get(fid);
+                r.onsuccess = function(){ res(r.result); };
+                r.onerror = function(e){ rej(e); };
+              });
+              if(!obj || !obj.data) continue;
+              // Upload vers le serveur
+              var dataUrl = obj.data;
+              var parts = dataUrl.split(",");
+              var mime = "application/octet-stream";
+              var mimeMatch = parts[0].match(/:(.*?);/);
+              if(mimeMatch) mime = mimeMatch[1];
+              var b64 = parts[1];
+              var binary = atob(b64);
+              var bytes = new Uint8Array(binary.length);
+              for(var i=0; i<binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              var blob = new Blob([bytes], {type: mime});
+              var fd = new FormData();
+              fd.append("fid", fid);
+              fd.append("file", blob, obj.name || "fichier");
+              await fetch("/api/files/upload", {method:"POST", body: fd});
+              synced++;
+              console.log("[FileSync] Synced:", fid, obj.name || "");
+            } catch(e){
+              console.warn("[FileSync] Bulk sync error for:", fid, e);
+            }
+          }
+          sessionStorage.setItem("_fdb_bulk_synced", "1");
+          if(synced > 0){
+            console.log("[FileSync] Bulk sync complete: " + synced + " files uploaded to server");
+            if(typeof toast === "function") toast(synced + " fichier(s) synchronise(s) avec le serveur");
+          } else {
+            console.log("[FileSync] All files already on server");
+          }
+        } catch(e){
+          console.warn("[FileSync] Bulk sync failed:", e);
+        }
+      }
+
+      // Lancer le bulk sync apres un court delai (attendre que Auth soit pret)
+      setTimeout(bulkSyncToServer, 3000);
+      // Re-essayer apres navigation SPA
+      window.addEventListener("hashchange", function(){ setTimeout(bulkSyncToServer, 2000); });
+
     })();
     """
     return "<" + "script>" + js + "</" + "script>"
@@ -840,8 +915,8 @@ def index():
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
     # Renommer le site dans le HTML statique
-    html = html.replace("RÃ©ussir l'EDHEC", "RÃ©ussir Ãtudes")
-    html = html.replace("RÃ©ussir l\\'EDHEC", "RÃ©ussir Ãtudes")
+    html = html.replace("RÃÂ©ussir l'EDHEC", "RÃÂ©ussir ÃÂtudes")
+    html = html.replace("RÃÂ©ussir l\\'EDHEC", "RÃÂ©ussir ÃÂtudes")
     # Injecter les scripts (ServerSync + Branding + Annales admin)
     patch = build_patch_script()
     branding = build_branding_patch()
