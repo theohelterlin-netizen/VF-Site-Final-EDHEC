@@ -1115,6 +1115,7 @@ def build_nav_fix_patch():
     js = """
 (function(){
     // Fix 1: Override navigate to fix double-slash AND call route()
+    var _origNav = window.navigate;
     window.navigate = function(p) {
         while(p.indexOf('//')===0) p = p.substring(1);
         location.hash = p;
@@ -1125,6 +1126,8 @@ def build_nav_fix_patch():
     window.addEventListener('hashchange', function(){
         if(typeof route === 'function') route();
     });
+
+    // Fix 3: Wrap ServerSync.init to prevent TypeError
     if(typeof ServerSync !== 'undefined' && ServerSync && ServerSync.init){
         var _origInit = ServerSync.init;
         ServerSync.init = function(){
@@ -1132,7 +1135,25 @@ def build_nav_fix_patch():
             catch(e){ console.warn('[ServerSync] init error:', e); return Promise.resolve(0); }
         };
     }
-    console.log('[NavFix] Navigation, hashchange, and ServerSync patches applied');
+
+    // Fix 4: Guard renderDashboard from async calls overwriting other pages
+    var _origRD = window.renderDashboard;
+    if(typeof _origRD === 'function'){
+        window.renderDashboard = function(){
+            var fromRoute = false;
+            try { var s=(new Error()).stack||''; fromRoute = s.indexOf('at route')!==-1||s.indexOf('route@')!==-1; } catch(e){}
+            if(!fromRoute){
+                var h = location.hash;
+                if(h && h!=='#/' && h!=='#/dashboard' && h!=='#'){
+                    console.log('[NavFix] Blocked async renderDashboard while on', h);
+                    return;
+                }
+            }
+            return _origRD.apply(this, arguments);
+        };
+    }
+
+    console.log('[NavFix] All navigation patches applied');
 })();
 """
     return "<" + "script>" + js + "</" + "script>"
