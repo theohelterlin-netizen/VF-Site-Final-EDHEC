@@ -50,6 +50,19 @@ def init_db():
     """)
 
     conn.commit()
+
+    # Table fichiers generaux (PDF, Excel, images - stockes en binaire)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS general_files (
+            fid TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            mimetype TEXT NOT NULL,
+            data BYTEA NOT NULL,
+            size INTEGER DEFAULT 0,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
     cur.close()
     conn.close()
 
@@ -183,6 +196,89 @@ def delete_pdf(filename):
 
 
 # ---------------------------------------------------------------------------
+# General Files API (synchronise IndexedDB <-> PostgreSQL)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/files/upload", methods=["POST"])
+def upload_general_file():
+    """Upload un fichier (PDF, Excel, image...) avec son fid IndexedDB."""
+    fid = request.form.get("fid")
+    if not fid or "file" not in request.files:
+        return jsonify({"error": "fid et file requis"}), 400
+    f = request.files["file"]
+    data = f.read()
+    mimetype = f.content_type or "application/octet-stream"
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO general_files (fid, filename, mimetype, data, size)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (fid) DO UPDATE
+               SET filename = EXCLUDED.filename,
+                   mimetype = EXCLUDED.mimetype,
+                   data = EXCLUDED.data,
+                   size = EXCLUDED.size,
+                   uploaded_at = NOW()""",
+            (fid, f.filename, mimetype, psycopg2.Binary(data), len(data))
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    return jsonify({"ok": True, "fid": fid, "filename": f.filename, "size": len(data)})
+
+
+@app.route("/api/files/<fid>", methods=["GET"])
+def get_general_file(fid):
+    """Telecharge un fichier par son fid."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT filename, mimetype, data FROM general_files WHERE fid = %s", (fid,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row is None:
+        return jsonify({"error": "Fichier non trouve"}), 404
+    return send_file(
+        BytesIO(bytes(row["data"])),
+        mimetype=row["mimetype"],
+        as_attachment=False,
+        download_name=row["filename"]
+    )
+
+
+@app.route("/api/files/<fid>/meta", methods=["GET"])
+def get_general_file_meta(fid):
+    """Renvoie les metadonnees d un fichier (sans le contenu binaire)."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT fid, filename, mimetype, size FROM general_files WHERE fid = %s", (fid,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row is None:
+        return jsonify({"exists": False}), 404
+    return jsonify({"exists": True, "fid": row["fid"], "filename": row["filename"],
+                     "mimetype": row["mimetype"], "size": row["size"]})
+
+
+@app.route("/api/files/<fid>", methods=["DELETE"])
+def delete_general_file(fid):
+    """Supprime un fichier."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM general_files WHERE fid = %s", (fid,))
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    if deleted:
+        return jsonify({"ok": True})
+    return jsonify({"error": "Fichier non trouve"}), 404
+
+
+# ---------------------------------------------------------------------------
 # Serve index.html with ServerSync patch injected
 # ---------------------------------------------------------------------------
 
@@ -196,24 +292,24 @@ def build_branding_patch():
     // --- Renommage du site ---
     function renameSite(){
         // Titre de la page
-        document.title = document.title.replace(/Réussir l'EDHEC/g, 'Réussir Études');
+        document.title = document.title.replace(/RÃ©ussir l'EDHEC/g, 'RÃ©ussir Ãtudes');
         // Tous les elements texte visibles
         var walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
         while(walk.nextNode()){
             var n = walk.currentNode;
-            if(n.nodeValue.indexOf("Réussir l'EDHEC") !== -1){
-                n.nodeValue = n.nodeValue.replace(/Réussir l'EDHEC/g, 'Réussir Études');
+            if(n.nodeValue.indexOf("RÃ©ussir l'EDHEC") !== -1){
+                n.nodeValue = n.nodeValue.replace(/RÃ©ussir l'EDHEC/g, 'RÃ©ussir Ãtudes');
             }
-            if(n.nodeValue.indexOf("Réussir l\\'EDHEC") !== -1){
-                n.nodeValue = n.nodeValue.replace(/Réussir l\\'EDHEC/g, 'Réussir Études');
+            if(n.nodeValue.indexOf("RÃ©ussir l\\'EDHEC") !== -1){
+                n.nodeValue = n.nodeValue.replace(/RÃ©ussir l\\'EDHEC/g, 'RÃ©ussir Ãtudes');
             }
         }
         // Aussi dans les placeholders et titles
         document.querySelectorAll('[placeholder],[title]').forEach(function(el){
             if(el.placeholder && el.placeholder.indexOf('EDHEC')!==-1)
-                el.placeholder = el.placeholder.replace(/EDHEC/g,'Études');
+                el.placeholder = el.placeholder.replace(/EDHEC/g,'Ãtudes');
             if(el.title && el.title.indexOf('EDHEC')!==-1)
-                el.title = el.title.replace(/EDHEC/g,'Études');
+                el.title = el.title.replace(/EDHEC/g,'Ãtudes');
         });
     }
     // Executer au chargement et apres chaque navigation SPA
@@ -533,6 +629,88 @@ def build_annales_patch():
     return "<" + "script>" + js + "</" + "script>"
 
 
+def build_filesync_patch():
+    """Patch FDB pour synchroniser les fichiers avec le serveur PostgreSQL."""
+    js = r"""
+    (function(){
+      if(window._fileSyncPatched) return;
+      window._fileSyncPatched = true;
+
+      var _origPut = FDB.put.bind(FDB);
+      var _origGet = FDB.get.bind(FDB);
+      var _origDel = FDB.del.bind(FDB);
+
+      // Override FDB.put : envoie aussi le fichier au serveur
+      FDB.put = async function(fid, obj){
+        var result = await _origPut(fid, obj);
+        try {
+          if(obj && obj.data){
+            var dataUrl = obj.data;
+            var parts = dataUrl.split(",");
+            var mime = parts[0].match(/:(.*?);/);
+            mime = mime ? mime[1] : "application/octet-stream";
+            var b64 = parts[1];
+            var binary = atob(b64);
+            var bytes = new Uint8Array(binary.length);
+            for(var i=0; i<binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            var blob = new Blob([bytes], {type: mime});
+            var fd = new FormData();
+            fd.append("fid", fid);
+            fd.append("file", blob, obj.name || "fichier");
+            fetch("/api/files/upload", {method:"POST", body: fd})
+              .then(function(r){ return r.json(); })
+              .then(function(d){ console.log("[FileSync] Uploaded:", fid); })
+              .catch(function(e){ console.warn("[FileSync] Upload failed:", fid, e); });
+          }
+        } catch(e){ console.warn("[FileSync] Upload error:", e); }
+        return result;
+      };
+
+      // Override FDB.get : fallback serveur si pas en local
+      FDB.get = async function(fid){
+        var local = await _origGet(fid);
+        if(local) return local;
+        try {
+          console.log("[FileSync] Trying server for:", fid);
+          var resp = await fetch("/api/files/" + encodeURIComponent(fid));
+          if(!resp.ok) return null;
+          var blob = await resp.blob();
+          var filename = "fichier";
+          var disp = resp.headers.get("content-disposition");
+          if(disp){
+            var match = disp.match(/filename[^;=\n]*=(["'].*?["']|[^;\n]*)/);
+            if(match) filename = match[1].replace(/["']/g, "");
+          }
+          var dataUrl = await new Promise(function(resolve){
+            var reader = new FileReader();
+            reader.onload = function(){ resolve(reader.result); };
+            reader.readAsDataURL(blob);
+          });
+          var fileObj = {name:filename, type:blob.type, size:blob.size, data:dataUrl};
+          try { await _origPut(fid, fileObj); } catch(e){}
+          console.log("[FileSync] Retrieved from server:", fid, filename);
+          return fileObj;
+        } catch(e){
+          console.warn("[FileSync] Server fetch failed:", fid, e);
+          return null;
+        }
+      };
+
+      // Override FDB.del : supprime aussi cote serveur
+      FDB.del = async function(fid){
+        var result = await _origDel(fid);
+        try {
+          fetch("/api/files/" + encodeURIComponent(fid), {method:"DELETE"}).catch(function(e){});
+        } catch(e){}
+        return result;
+      };
+
+      console.log("[FileSync] FDB patched for server sync");
+    })();
+    """
+    return "<" + "script>" + js + "</" + "script>"
+
+
 def build_patch_script():
     """Construit le JavaScript ServerSync a injecter."""
     js = r"""
@@ -662,13 +840,14 @@ def index():
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
     # Renommer le site dans le HTML statique
-    html = html.replace("Réussir l'EDHEC", "Réussir Études")
-    html = html.replace("Réussir l\\'EDHEC", "Réussir Études")
+    html = html.replace("RÃ©ussir l'EDHEC", "RÃ©ussir Ãtudes")
+    html = html.replace("RÃ©ussir l\\'EDHEC", "RÃ©ussir Ãtudes")
     # Injecter les scripts (ServerSync + Branding + Annales admin)
     patch = build_patch_script()
     branding = build_branding_patch()
     annales = build_annales_patch()
-    html = html.replace("</body>", patch + "\n" + branding + "\n" + annales + "\n</body>", 1)
+    filesync = build_filesync_patch()
+    html = html.replace("</body>", filesync + "\n" + patch + "\n" + branding + "\n" + annales + "\n</body>", 1)
     return Response(html, mimetype="text/html")
 
 
