@@ -683,9 +683,8 @@ def build_filesync_patch():
         return result;
     };
 
-    // Bulk sync for admin
+    // Bulk sync - push local IndexedDB files to server for all users
     async function bulkSyncToServer(){
-        if(typeof Auth === "undefined" || !Auth.admin || !Auth.admin()) return;
         if(sessionStorage.getItem("_fdb_bulk_synced")) return;
         try {
             var db = await new Promise(function(res, rej){ var req = indexedDB.open("edhec_files", 1); req.onsuccess = function(e){ res(e.target.result); }; req.onerror = function(e){ rej(e); }; });
