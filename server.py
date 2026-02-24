@@ -1110,6 +1110,27 @@ def build_patch_script():
     return "<" + "script>" + js + "</" + "script>"
 
 
+
+def build_nav_fix_patch():
+    js = """
+(function(){
+    var _origNavigate = window.navigate;
+    window.navigate = function(p) {
+        while(p.indexOf('//')===0) p = p.substring(1);
+        _origNavigate(p);
+    };
+    if(typeof ServerSync !== 'undefined' && ServerSync && ServerSync.init){
+        var _origInit = ServerSync.init;
+        ServerSync.init = function(){
+            try { return _origInit.apply(this, arguments); }
+            catch(e){ console.warn('[ServerSync] init error:', e); return Promise.resolve(0); }
+        };
+    }
+    console.log('[NavFix] Patches applied');
+})();
+"""
+    return "<" + "script>" + js + "</" + "script>"
+
 @app.route("/")
 def index():
     html_path = os.path.join(app.static_folder, "index.html")
@@ -1129,6 +1150,7 @@ def index():
     branding     = build_branding_patch()
     annales      = build_annales_patch()
     infos_rt     = build_infos_richtext_patch()
+    nav_fix      = build_nav_fix_patch()
 
     # Injecter dans l ordre : filesync, exam, device, announcements, serversync, branding, annales
     html = html.replace(
@@ -1140,7 +1162,8 @@ def index():
         patch + "\n" +
         branding + "\n" +
         annales + "\n" +
-                infos_rt + "\n</body>",
+                infos_rt + "\n" +
+                    nav_fix + "\n</body>",
         1
     )
     return Response(html, mimetype="text/html")
