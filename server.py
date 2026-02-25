@@ -1259,7 +1259,46 @@ def build_nav_fix_patch():
             };
         }
 
-        console.log('[NavFix] All navigation patches applied');
+                // Fix 7: Override downloadAnnaleFile to fallback to server when IndexedDB is empty
+        var _origDownloadAnnaleFile = window.downloadAnnaleFile;
+        window.downloadAnnaleFile = async function(fid, fname) {
+            try {
+                var f = await FDB.get(fid);
+                if (f && f.data) {
+                    var a = document.createElement('a');
+                    a.href = f.data;
+                    a.download = fname || f.name || 'document.pdf';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    return;
+                }
+            } catch(e) {
+                console.warn('[NavFix] FDB.get failed for', fid, e);
+            }
+            // Fallback: fetch from server
+            try {
+                var resp = await fetch('/api/files/' + fid);
+                if (!resp.ok) {
+                    toast('Fichier introuvable sur le serveur', 'err');
+                    return;
+                }
+                var blob = await resp.blob();
+                var url = URL.createObjectURL(blob);
+                var a = document.createElement('a');
+                a.href = url;
+                a.download = fname || 'document.pdf';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
+            } catch(e2) {
+                console.error('[NavFix] Server download failed for', fid, e2);
+                toast('Erreur de telechargement', 'err');
+            }
+        };
+
+console.log('[NavFix] All navigation patches applied');
 })();
 """
     return "<" + "script>" + js + "</" + "script>"
