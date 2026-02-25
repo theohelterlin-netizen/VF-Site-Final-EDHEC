@@ -1332,7 +1332,7 @@ style.textContent = [
 ".excel-moy-modal { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:10000; }",
 ".excel-moy-modal-content { background:#fff; border-radius:16px; padding:24px; width:90%; max-width:500px; }",
 ".excel-moy-modal input,.excel-moy-modal textarea { width:100%; padding:10px; margin:8px 0; border:1px solid #ddd; border-radius:8px; box-sizing:border-box; }"
-].join("\n");
+].join("\\n");
 document.head.appendChild(style);
 function isAdmin(){ try { var u=Auth.current(); return u&&u.role==="admin"; } catch(e){ return false; } }
 function renderExcelMoy(){
