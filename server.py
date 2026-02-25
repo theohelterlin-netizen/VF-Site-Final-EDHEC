@@ -1370,7 +1370,7 @@ window.showExcelMoyModal = function(editId, editTitle, editDesc){
     '<textarea id="excel-moy-desc" placeholder="Description (optionnel)" rows="3">' + (editDesc||'') + '</textarea>' +
     '<input type="file" id="excel-moy-file" accept=".xlsx,.xls,.csv">' +
     '<div style="text-align:right;margin-top:16px;">' +
-    '<button class="excel-moy-btn" onclick="this.closest(\'.excel-moy-modal\').remove()">Annuler</button> ' +
+    '<button class="excel-moy-btn" onclick="this.closest(&#39;.excel-moy-modal&#39;).remove()">Annuler</button> ' +
     '<button class="excel-moy-btn excel-moy-btn-primary" id="excel-moy-submit">Enregistrer</button>' +
     '</div></div>';
   document.body.appendChild(modal);
