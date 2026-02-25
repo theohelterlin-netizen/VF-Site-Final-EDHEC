@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import secrets
+import time
 from functools import wraps
 from io import BytesIO
 
@@ -65,6 +66,32 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_exams (
             user_email TEXT PRIMARY KEY,
             exams_data TEXT NOT NULL DEFAULT '[]',
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+
+    # Table pour la progression QCM par utilisateur
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_qcm_progress (
+            user_email TEXT PRIMARY KEY,
+            progress   TEXT NOT NULL DEFAULT '{}',
+            qcm_scores TEXT NOT NULL DEFAULT '{}',
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+
+    # Table pour les fichiers Excel de calcul de moyenne annuelle
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS excel_moyennes (
+            id         SERIAL PRIMARY KEY,
+            title      TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            fid        TEXT NOT NULL,
+            filename   TEXT NOT NULL,
+            size       INTEGER DEFAULT 0,
+            uploaded_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -316,6 +343,173 @@ def save_user_exams():
     conn.commit()
     cur.close()
     conn.close()
+    return jsonify({"ok": True})
+
+# ---------------------------------------------------------------------------
+# QCM Progress per-user API
+# ---------------------------------------------------------------------------
+@app.route("/api/user/qcm", methods=["GET"])
+def get_user_qcm():
+    email = request.args.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "email required"}), 400
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("SELECT progress, qcm_scores FROM user_qcm_progress WHERE user_email = %s", (email,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row:
+        return jsonify({
+            "progress": json.loads(row["progress"]),
+            "qcm_scores": json.loads(row["qcm_scores"])
+        })
+    return jsonify({"progress": {}, "qcm_scores": {}})
+
+@app.route("/api/user/qcm", methods=["POST"])
+def save_user_qcm():
+    data  = request.get_json(silent=True) or {}
+    email = data.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "email required"}), 400
+    progress   = data.get("progress")
+    qcm_scores = data.get("qcm_scores")
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("SELECT progress, qcm_scores FROM user_qcm_progress WHERE user_email = %s", (email,))
+    row = cur.fetchone()
+    if row:
+        existing_progress = json.loads(row["progress"])
+        existing_scores   = json.loads(row["qcm_scores"])
+    else:
+        existing_progress = {}
+        existing_scores   = {}
+    if progress is not None:
+        existing_progress.update(progress)
+    if qcm_scores is not None:
+        existing_scores.update(qcm_scores)
+    cur.execute(
+        """INSERT INTO user_qcm_progress (user_email, progress, qcm_scores)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (user_email) DO UPDATE
+           SET progress = EXCLUDED.progress, qcm_scores = EXCLUDED.qcm_scores, updated_at = NOW()""",
+        (email, json.dumps(existing_progress), json.dumps(existing_scores))
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True})
+
+# ---------------------------------------------------------------------------
+# Excel Moyennes API (calcul de moyenne annuelle)
+# ---------------------------------------------------------------------------
+@app.route("/api/excel-moyennes", methods=["GET"])
+def list_excel_moyennes():
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("""SELECT id, title, description, fid, filename, size, uploaded_at, updated_at
+                   FROM excel_moyennes ORDER BY uploaded_at DESC""")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r["id"], "title": r["title"], "description": r["description"],
+            "fid": r["fid"], "filename": r["filename"], "size": r["size"],
+            "uploaded_at": r["uploaded_at"].isoformat() if r["uploaded_at"] else None,
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None
+        })
+    return jsonify(result)
+
+@app.route("/api/excel-moyennes", methods=["POST"])
+def upload_excel_moyenne():
+    title = request.form.get("title", "").strip()
+    description = request.form.get("description", "").strip()
+    if not title or "file" not in request.files:
+        return jsonify({"error": "title et file requis"}), 400
+    f = request.files["file"]
+    data = f.read()
+    mimetype = f.content_type or "application/octet-stream"
+    fid = "excel_moy_" + str(int(time.time() * 1000))
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO general_files (fid, filename, mimetype, data, size)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (fid) DO UPDATE
+               SET filename = EXCLUDED.filename, mimetype = EXCLUDED.mimetype,
+                   data = EXCLUDED.data, size = EXCLUDED.size, uploaded_at = NOW()""",
+            (fid, f.filename, mimetype, psycopg2.Binary(data), len(data))
+        )
+        cur.execute(
+            """INSERT INTO excel_moyennes (title, description, fid, filename, size)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (title, description, fid, f.filename, len(data))
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    return jsonify({"ok": True, "fid": fid, "filename": f.filename, "size": len(data)})
+
+@app.route("/api/excel-moyennes/<int:item_id>", methods=["PUT"])
+def update_excel_moyenne(item_id):
+    title = request.form.get("title", "").strip()
+    description = request.form.get("description", "").strip()
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        if "file" in request.files:
+            f = request.files["file"]
+            data = f.read()
+            mimetype = f.content_type or "application/octet-stream"
+            cur.execute("SELECT fid FROM excel_moyennes WHERE id = %s", (item_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "not found"}), 404
+            fid = row["fid"]
+            cur.execute(
+                """INSERT INTO general_files (fid, filename, mimetype, data, size)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (fid) DO UPDATE
+                   SET filename = EXCLUDED.filename, mimetype = EXCLUDED.mimetype,
+                       data = EXCLUDED.data, size = EXCLUDED.size, uploaded_at = NOW()""",
+                (fid, f.filename, mimetype, psycopg2.Binary(data), len(data))
+            )
+            cur.execute(
+                """UPDATE excel_moyennes SET title=%s, description=%s, filename=%s, size=%s, updated_at=NOW()
+                   WHERE id=%s""",
+                (title, description, f.filename, len(data), item_id)
+            )
+        else:
+            cur.execute(
+                "UPDATE excel_moyennes SET title=%s, description=%s, updated_at=NOW() WHERE id=%s",
+                (title, description, item_id)
+            )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+    return jsonify({"ok": True})
+
+@app.route("/api/excel-moyennes/<int:item_id>", methods=["DELETE"])
+def delete_excel_moyenne(item_id):
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute("SELECT fid FROM excel_moyennes WHERE id = %s", (item_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        fid = row["fid"]
+        cur.execute("DELETE FROM excel_moyennes WHERE id = %s", (item_id,))
+        cur.execute("DELETE FROM general_files WHERE fid = %s", (fid,))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
     return jsonify({"ok": True})
 
 # ---------------------------------------------------------------------------
@@ -802,6 +996,109 @@ def build_exam_peruser_patch():
     return "<" + "script>" + js + "</" + "script>"
 
 
+def build_qcm_peruser_patch():
+    """Patch pour rendre la progression QCM propre a chaque eleve."""
+    js = ""
+    js += "(function(){\n"
+    js += "    if(window._qcmPerUserPatched) return;\n"
+    js += "    window._qcmPerUserPatched = true;\n"
+    js += "    function getUserEmail(){\n"
+    js += "        try { var u = Auth.current(); return u && u.email ? u.email.trim().toLowerCase() : null; } catch(e){ return null; }\n"
+    js += "    }\n"
+    js += "    function sanitize(email){ return email.replace(/[^a-z0-9]/g, '_'); }\n"
+    js += "    var _prevDBget = DB.get.bind(DB);\n"
+    js += "    var _prevDBset = DB.set.bind(DB);\n"
+    js += "    DB.get = function(key){\n"
+    js += "        if(key === 'progress' || key === 'qcm_scores'){\n"
+    js += "            var email = getUserEmail();\n"
+    js += "            if(email){\n"
+    js += "                var perUserKey = key + '_' + sanitize(email);\n"
+    js += "                var val = _prevDBget(perUserKey);\n"
+    js += "                if(val !== null && val !== undefined) return val;\n"
+    js += "                return key === 'progress' ? {} : {};\n"
+    js += "            }\n"
+    js += "        }\n"
+    js += "        return _prevDBget(key);\n"
+    js += "    };\n"
+    js += "    DB.set = function(key, val){\n"
+    js += "        if(key === 'progress' || key === 'qcm_scores'){\n"
+    js += "            var email = getUserEmail();\n"
+    js += "            if(email){\n"
+    js += "                var perUserKey = key + '_' + sanitize(email);\n"
+    js += "                _prevDBset(perUserKey, val);\n"
+    js += "                var payload = {email: email};\n"
+    js += "                payload[key] = val;\n"
+    js += "                fetch('/api/user/qcm', {\n"
+    js += "                    method: 'POST',\n"
+    js += "                    headers: {'Content-Type': 'application/json'},\n"
+    js += "                    body: JSON.stringify(payload)\n"
+    js += "                }).catch(function(e){ console.warn('[QCMSync] Push failed:', e); });\n"
+    js += "                return;\n"
+    js += "            }\n"
+    js += "        }\n"
+    js += "        return _prevDBset(key, val);\n"
+    js += "    };\n"
+
+    js += "    function pullUserQCM(){\n"
+    js += "        var email = getUserEmail();\n"
+    js += "        if(!email) return;\n"
+    js += "        fetch('/api/user/qcm?email=' + encodeURIComponent(email))\n"
+    js += "        .then(function(r){ return r.json(); })\n"
+    js += "        .then(function(data){\n"
+    js += "            var sEmail = sanitize(email);\n"
+    js += "            if(data.progress && Object.keys(data.progress).length > 0){\n"
+    js += "                var pKey = 'progress_' + sEmail;\n"
+    js += "                var local = _prevDBget(pKey);\n"
+    js += "                if(!local || Object.keys(local).length === 0){\n"
+    js += "                    _prevDBset(pKey, data.progress);\n"
+    js += "                }\n"
+    js += "            }\n"
+    js += "            if(data.qcm_scores && Object.keys(data.qcm_scores).length > 0){\n"
+    js += "                var sKey = 'qcm_scores_' + sEmail;\n"
+    js += "                var local2 = _prevDBget(sKey);\n"
+    js += "                if(!local2 || Object.keys(local2).length === 0){\n"
+    js += "                    _prevDBset(sKey, data.qcm_scores);\n"
+    js += "                }\n"
+    js += "            }\n"
+    js += "        }).catch(function(e){ console.warn('[QCMSync] Pull failed:', e); });\n"
+    js += "    }\n"
+    js += "    function migrateSharedQCM(){\n"
+    js += "        var email = getUserEmail();\n"
+    js += "        if(!email) return;\n"
+    js += "        var sEmail = sanitize(email);\n"
+    js += "        var pKey = 'progress_' + sEmail;\n"
+    js += "        var sKey = 'qcm_scores_' + sEmail;\n"
+    js += "        var existingP = _prevDBget(pKey);\n"
+    js += "        var existingS = _prevDBget(sKey);\n"
+    js += "        if((!existingP || Object.keys(existingP).length === 0)){\n"
+    js += "            var sharedP = _prevDBget('progress');\n"
+    js += "            if(sharedP && Object.keys(sharedP).length > 0){\n"
+    js += "                _prevDBset(pKey, sharedP);\n"
+    js += "                fetch('/api/user/qcm', {\n"
+    js += "                    method: 'POST',\n"
+    js += "                    headers: {'Content-Type': 'application/json'},\n"
+    js += "                    body: JSON.stringify({email: email, progress: sharedP})\n"
+    js += "                }).catch(function(e){});\n"
+    js += "            }\n"
+    js += "        }\n"
+    js += "        if((!existingS || Object.keys(existingS).length === 0)){\n"
+    js += "            var sharedS = _prevDBget('qcm_scores');\n"
+    js += "            if(sharedS && Object.keys(sharedS).length > 0){\n"
+    js += "                _prevDBset(sKey, sharedS);\n"
+    js += "                fetch('/api/user/qcm', {\n"
+    js += "                    method: 'POST',\n"
+    js += "                    headers: {'Content-Type': 'application/json'},\n"
+    js += "                    body: JSON.stringify({email: email, qcm_scores: sharedS})\n"
+    js += "                }).catch(function(e){});\n"
+    js += "            }\n"
+    js += "        }\n"
+    js += "    }\n"
+    js += "    setTimeout(function(){ migrateSharedQCM(); pullUserQCM(); }, 2500);\n"
+    js += "    window.addEventListener('hashchange', function(){ setTimeout(pullUserQCM, 500); });\n"
+    js += "    console.log('[QCMSync] Per-user QCM progress enabled');\n"
+    js += "})();\n"
+    return "<" + "script>" + js + "</" + "script>"
+
 def build_device_patch():
     """Patch pour permettre plusieurs appareils PC par utilisateur."""
     js = ""
@@ -1016,6 +1313,98 @@ def build_infos_richtext_patch():
   };
 })();
 </script>"""
+
+def build_excel_moyennes_patch():
+    """Patch pour gerer les fichiers Excel de calcul de moyenne annuelle."""
+    js = ""
+    js += "(function(){\n"
+    js += "if(window._excelMoyPatched) return;\n"
+    js += "window._excelMoyPatched = true;\n"
+    js += "var style = document.createElement('style');\n"
+    js += "style.textContent = '\n"
+    js += ".excel-moy-section { max-width:900px; margin:20px auto; padding:20px; }\n"
+    js += ".excel-moy-card { background:#fff; border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:0 2px 8px rgba(0,0,0,0.08); display:flex; justify-content:space-between; align-items:center; }\n"
+    js += ".excel-moy-card h4 { margin:0 0 4px 0; color:#1a1a2e; }\n"
+    js += ".excel-moy-card p { margin:0; color:#666; font-size:0.9em; }\n"
+    js += ".excel-moy-btn { padding:8px 16px; border:none; border-radius:8px; cursor:pointer; font-size:0.9em; margin-left:8px; }\n"
+    js += ".excel-moy-btn-primary { background:#667eea; color:#fff; }\n"
+    js += ".excel-moy-btn-danger { background:#e74c3c; color:#fff; }\n"
+    js += ".excel-moy-btn-success { background:#27ae60; color:#fff; }\n"
+    js += ".excel-moy-modal { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:10000; }\n"
+    js += ".excel-moy-modal-content { background:#fff; border-radius:16px; padding:24px; width:90%; max-width:500px; }\n"
+    js += ".excel-moy-modal input, .excel-moy-modal textarea { width:100%; padding:10px; margin:8px 0; border:1px solid #ddd; border-radius:8px; box-sizing:border-box; }\n"
+    js += "';\n"
+    js += "document.head.appendChild(style);\n"
+
+    js += "function isAdmin(){ try { var u=Auth.current(); return u&&u.role==='admin'; } catch(e){ return false; } }\n"
+    js += "function renderExcelMoy(){\n"
+    js += "  var container = document.getElementById('excel-moyennes-section');\n"
+    js += "  if(!container){ container = document.createElement('div'); container.id='excel-moyennes-section'; container.className='excel-moy-section'; }\n"
+    js += "  fetch('/api/excel-moyennes').then(function(r){return r.json();}).then(function(items){\n"
+    js += "    var html = '<h2 style=\\"color:#1a1a2e;margin-bottom:16px;\\">Calcul de Moyenne Annuelle</h2>';\n"
+    js += "    if(isAdmin()){ html += '<button class=\\"excel-moy-btn excel-moy-btn-primary\\" onclick=\\"showExcelMoyModal()\\">+ Ajouter un fichier</button><br><br>'; }\n"
+    js += "    if(items.length === 0){ html += '<p style=\\"color:#888;\\">Aucun fichier disponible.</p>'; }\n"
+    js += "    items.forEach(function(item){\n"
+    js += "      html += '<div class=\\"excel-moy-card\\">';\n"
+    js += "      html += '<div><h4>' + item.title + '</h4>';\n"
+    js += "      if(item.description) html += '<p>' + item.description + '</p>';\n"
+    js += "      html += '<p style=\\"font-size:0.8em;color:#999;\\">' + item.filename + ' (' + Math.round(item.size/1024) + ' Ko)</p></div>';\n"
+    js += "      html += '<div>';\n"
+    js += "      html += '<a href=\\"/api/files/' + item.fid + '\\" class=\\"excel-moy-btn excel-moy-btn-success\\" download>Telecharger</a>';\n"
+    js += "      if(isAdmin()){\n"
+    js += "        html += '<button class=\\"excel-moy-btn excel-moy-btn-primary\\" onclick=\\"showExcelMoyModal(' + item.id + ',\\\\\\"' + item.title.replace(/\"/g,'') + '\\\\\\"' + ',\\\\\\"' + item.description.replace(/\"/g,'') + '\\\\\\")\\">Modifier</button>';\n"
+    js += "        html += '<button class=\\"excel-moy-btn excel-moy-btn-danger\\" onclick=\\"deleteExcelMoy(' + item.id + ')\\">Supprimer</button>';\n"
+    js += "      }\n"
+    js += "      html += '</div></div>';\n"
+    js += "    });\n"
+    js += "    container.innerHTML = html;\n"
+    js += "    var main = document.querySelector('.main-content') || document.querySelector('#app') || document.body;\n"
+    js += "    if(!document.getElementById('excel-moyennes-section')){ main.appendChild(container); }\n"
+    js += "  }).catch(function(e){ console.warn('[ExcelMoy] Load failed:', e); });\n"
+    js += "}\n"
+
+    js += "window.showExcelMoyModal = function(editId, editTitle, editDesc){\n"
+    js += "  var isEdit = editId !== undefined;\n"
+    js += "  var modal = document.createElement('div');\n"
+    js += "  modal.className = 'excel-moy-modal';\n"
+    js += "  modal.innerHTML = '<div class=\\"excel-moy-modal-content\\">' +\n"
+    js += "    '<h3>' + (isEdit ? 'Modifier' : 'Ajouter') + ' un fichier Excel</h3>' +\n"
+    js += "    '<input type=\\"text\\" id=\\"excel-moy-title\\" placeholder=\\"Titre\\" value=\\"' + (editTitle||'') + '\\">' +\n"
+    js += "    '<textarea id=\\"excel-moy-desc\\" placeholder=\\"Description (optionnel)\\" rows=\\"3\\">' + (editDesc||'') + '</textarea>' +\n"
+    js += "    '<input type=\\"file\\" id=\\"excel-moy-file\\" accept=\\".xlsx,.xls,.csv\\">' +\n"
+    js += "    '<div style=\\"text-align:right;margin-top:16px;\\">' +\n"
+    js += "    '<button class=\\"excel-moy-btn\\" onclick=\\"this.closest(\\\\\\'.excel-moy-modal\\\\\\').remove()\\">Annuler</button> ' +\n"
+    js += "    '<button class=\\"excel-moy-btn excel-moy-btn-primary\\" id=\\"excel-moy-submit\\">Enregistrer</button>' +\n"
+    js += "    '</div></div>';\n"
+    js += "  document.body.appendChild(modal);\n"
+    js += "  document.getElementById('excel-moy-submit').onclick = function(){\n"
+    js += "    var fd = new FormData();\n"
+    js += "    fd.append('title', document.getElementById('excel-moy-title').value);\n"
+    js += "    fd.append('description', document.getElementById('excel-moy-desc').value);\n"
+    js += "    var fileInput = document.getElementById('excel-moy-file');\n"
+    js += "    if(fileInput.files.length > 0) fd.append('file', fileInput.files[0]);\n"
+    js += "    var url = isEdit ? '/api/excel-moyennes/' + editId : '/api/excel-moyennes';\n"
+    js += "    var method = isEdit ? 'PUT' : 'POST';\n"
+    js += "    if(!isEdit && fileInput.files.length === 0){ alert('Veuillez choisir un fichier'); return; }\n"
+    js += "    fetch(url, {method: method, body: fd}).then(function(r){return r.json();}).then(function(){\n"
+    js += "      modal.remove(); renderExcelMoy();\n"
+    js += "    }).catch(function(e){ alert('Erreur: ' + e); });\n"
+    js += "  };\n"
+    js += "};\n"
+    js += "window.deleteExcelMoy = function(id){\n"
+    js += "  if(!confirm('Supprimer ce fichier ?')) return;\n"
+    js += "  fetch('/api/excel-moyennes/' + id, {method:'DELETE'}).then(function(){renderExcelMoy();}).catch(function(e){alert('Erreur: '+e);});\n"
+    js += "};\n"
+    js += "function tryInjectExcelMoy(){\n"
+    js += "  if(window.location.hash.indexOf('moyenne') !== -1 || window.location.hash.indexOf('excel') !== -1 || window.location.hash === '#/dashboard' || window.location.hash === '' || window.location.hash === '#/'){\n"
+    js += "    setTimeout(renderExcelMoy, 500);\n"
+    js += "  }\n"
+    js += "}\n"
+    js += "window.addEventListener('hashchange', tryInjectExcelMoy);\n"
+    js += "setTimeout(tryInjectExcelMoy, 2000);\n"
+    js += "console.log('[ExcelMoy] Excel moyennes patch enabled');\n"
+    js += "})();\n"
+    return "<" + "script>" + js + "</" + "script>"
 
 def build_patch_script():
     """Construit le JavaScript ServerSync a injecter."""
@@ -1316,11 +1705,13 @@ def index():
     # Construire tous les patches
     filesync     = build_filesync_patch()
     exam_patch   = build_exam_peruser_patch()
+    qcm_patch    = build_qcm_peruser_patch()
     device_patch = build_device_patch()
     ann_patch    = build_announcements_patch()
     patch        = build_patch_script()
     branding     = build_branding_patch()
     annales      = build_annales_patch()
+    excel_moy    = build_excel_moyennes_patch()
     infos_rt     = build_infos_richtext_patch()
     nav_fix      = build_nav_fix_patch()
 
@@ -1329,11 +1720,13 @@ def index():
         "</body>",
         filesync + "\n" +
         exam_patch + "\n" +
+        qcm_patch + "\n" +
         device_patch + "\n" +
         ann_patch + "\n" +
         patch + "\n" +
         branding + "\n" +
         annales + "\n" +
+        excel_moy + "\n" +
                 infos_rt + "\n" +
                     nav_fix + "\n</body>",
         1
