@@ -1393,7 +1393,7 @@ window.deleteExcelMoy = function(id){
   fetch("/api/excel-moyennes/" + id, {method:"DELETE"}).then(function(){renderExcelMoy();}).catch(function(e){alert("Erreur: "+e);});
 };
 function tryInjectExcelMoy(){
-  if(window.location.hash.indexOf("moyenne") !== -1 || window.location.hash.indexOf("excel") !== -1 || window.location.hash === "#/dashboard" || window.location.hash === "" || window.location.hash === "#/"){
+  if(window.location.hash.indexOf("moyenne") !== -1 || window.location.hash.indexOf("excel") !== -1 || window.location.hash === "#/dashboard" || window.location.hash === "#/admin" || window.location.hash.indexOf("#/1") !== -1 || window.location.hash === "" || window.location.hash === "#/"){
     setTimeout(renderExcelMoy, 500);
   }
 }
